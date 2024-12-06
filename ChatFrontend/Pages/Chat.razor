@@ -1,0 +1,188 @@
+﻿@page "/"
+@using Microsoft.AspNetCore.SignalR.Client
+@using Shared
+@inject IJSRuntime JSRuntime
+
+<div class="chat-wrapper">
+    <div class="menu">
+        <h4>Menu</h4>
+        @if (IsEditingNickname)
+        {
+            <input @bind="TempUser" placeholder="Enter your nickname" />
+            <button @onclick="SaveNickname">Save</button>
+        }
+        else
+        {
+            <div>
+                <span>Your nickname: <strong>@User</strong></span>
+                <button @onclick="StartEditingNickname">Change Nickname</button>
+            </div>
+        }
+        <button class="theme-toggle-button" @onclick="ToggleTheme">
+            @(IsDarkTheme ? "Light Theme" : "Dark Theme")
+        </button>
+    </div>
+
+    <div class="chat-container">
+        <div class="chat-header">Real-Time Chat</div>
+        <div class="chat-messages">
+            @foreach (var chatMessage in Messages)
+            {
+                <div class="chat-message">
+                    <div class="message-user">@chatMessage.UserName:</div>
+                    <div class="message-text">@chatMessage.Message</div>
+                    <div class="message-sentiment">@GetSentimentEmoji(chatMessage.Sentiment)</div>
+                </div>
+            }
+        </div>
+        <div class="chat-input">
+            <input type="text" @bind="Message" @onkeyup="CheckForEnterAsync" placeholder="Enter your message" />
+            <button @onclick="SendMessageAsync">Send</button>
+        </div>
+    </div>
+</div>
+
+@code {
+    private HubConnection? connection;
+    private string User { get; set; } = "Anon";
+    private string TempUser { get; set; } = string.Empty;
+    private string Message { get; set; } = string.Empty;
+    private List<ChatMessage> Messages = new();
+    private bool IsEditingNickname { get; set; } = false;
+    private bool IsDarkTheme { get; set; } = false;
+
+    protected override async Task OnInitializedAsync()
+    {
+        User = await JSRuntime.InvokeAsync<string>("localStorage.getItem", "chatUser") ?? string.Empty;
+
+        var theme = await JSRuntime.InvokeAsync<string>("localStorage.getItem", "theme");
+        if (theme == "dark")
+        {
+            IsDarkTheme = true;
+            await SetDarkTheme();
+        }
+        else
+        {
+            IsDarkTheme = false;
+            await SetLightTheme();
+        }
+
+        connection = new HubConnectionBuilder()
+            .WithUrl("https://realtimechatapp-a6fudggegpgqd9bm.westeurope-01.azurewebsites.net/chathub")
+            .Build();
+
+        connection.On<string, string, string>("ReceiveMessageWithSentiment", async (user, message, sentiment) =>
+        {
+            Messages.Add(new ChatMessage
+                {
+                    UserName = user,
+                    Message = message,
+                    Sentiment = sentiment,
+                    CreatedAt = DateTime.UtcNow
+                });
+            await JSRuntime.InvokeVoidAsync("playNotificationSound");
+            await InvokeAsync(StateHasChanged);
+        });
+
+        connection.On<List<ChatMessage>>("ReceiveChatHistory", (chatHistory) =>
+        {
+            Console.WriteLine($"Received {chatHistory.Count} chat messages from server.");
+
+            Messages = chatHistory.OrderBy(m => m.CreatedAt).ToList();
+            InvokeAsync(StateHasChanged);
+        });
+
+        try
+        {
+            await connection.StartAsync();
+            Console.WriteLine("SignalR connected.");
+
+            await connection.SendAsync("LoadChatHistory");
+            Console.WriteLine("LoadChatHistory invoked.");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Failed to connect: {ex.Message}");
+        }
+
+        await connection.SendAsync("LoadChatHistory");
+    }
+    
+    private async Task SaveNickname()
+    {
+        if (!string.IsNullOrWhiteSpace(TempUser))
+        {
+            User = TempUser;
+
+            await JSRuntime.InvokeVoidAsync("localStorage.setItem", "chatUser", User);
+
+            IsEditingNickname = false;
+        }
+    }
+
+    private void StartEditingNickname()
+    {
+        TempUser = User;
+        IsEditingNickname = true;
+    }
+    private async Task CheckForEnterAsync(KeyboardEventArgs e)
+    {
+        if (e.Key.Contains("Enter"))
+        {
+            await  SendMessageAsync();
+        }
+    }
+    private async Task SendMessageAsync()
+    {
+        if (connection is not null && !string.IsNullOrWhiteSpace(Message))
+        {
+            await connection.InvokeAsync("AnalyzeAndSendMessage", User, Message);
+            Message = string.Empty;
+        }
+    }
+
+    private string GetSentimentEmoji(string sentiment)
+    {
+        return sentiment switch
+        {
+            "Positive" => "😊",
+            "Negative" => "😡",
+            "Neutral" => "😐",
+            _ => "❓"
+        };
+    }
+
+    private async Task ToggleTheme()
+    {
+        if (IsDarkTheme)
+        {
+            await SetLightTheme();
+            IsDarkTheme = false;
+            await JSRuntime.InvokeVoidAsync("localStorage.setItem", "theme", "light");
+        }
+        else
+        {
+            await SetDarkTheme();
+            IsDarkTheme = true;
+            await JSRuntime.InvokeVoidAsync("localStorage.setItem", "theme", "dark");
+        }
+    }
+
+    private async Task SetDarkTheme()
+    {
+        await JSRuntime.InvokeVoidAsync("document.documentElement.setAttribute", "data-theme", "dark");
+    }
+
+    private async Task SetLightTheme()
+    {
+        await JSRuntime.InvokeVoidAsync("document.documentElement.removeAttribute", "data-theme");
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        if (connection is not null)
+        {
+            await connection.DisposeAsync();
+        }
+    }
+}
